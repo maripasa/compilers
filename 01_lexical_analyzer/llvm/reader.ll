@@ -6,52 +6,61 @@
     i64,      ; 4 forward position
     i1,       ; 5 begin buffer: false = 0, true = 1
     i64,      ; 6 begin position
-    i64,      ; 7 valid unread chunk in buffer 0 (0 when consumed)
-    i64,      ; 8 valid unread chunk in buffer 1 (0 when consumed)
+    i64,      ; 7 valid bytes in buffer 0
+    i64,      ; 8 valid bytes in buffer 1
     i1,       ; 9 file exhausted; buffered bytes may remain
-    ptr,      ; 10 current lexeme buffer
-    i64,      ; 11 current lexeme length
-    i64,      ; 12 current lexeme capacity
-    i1        ; 13 currently collecting a lexeme
+    i1,       ; 10 currently collecting a lexeme
+    i32       ; 11 reader status: 0 = ok, -2 = lexeme too long, -3 = read error
 }
+
+%Lexeme = type { ptr, i64, ptr, i64 }
+
+@read_mode = private constant [3 x i8] c"rb\00"
 
 ;;;;; C FUNCTIONS
 
 declare ptr @fopen(ptr, ptr) ;; *filename *mode
 declare i64 @fread(ptr, i64, i64, ptr) ;; *buffer size count *file
 declare ptr @malloc(i64) ;; size
-declare ptr @realloc(ptr, i64) ;; pointer, new size
 declare i32 @fclose(ptr)
 declare void @free(ptr)
 declare i32 @ferror(ptr)
-
-@read_mode = private constant [2 x i8] c"r\00"
 
 ;;;;; MAIN INTERFACE
 
 ;; Initialize caller-owned Reader storage. Return reader on success or null on failure.
 define ptr @reader_init(ptr %reader, ptr %filename) {
-;; create buffers 0 and 1
 entry:
   %file = call ptr @fopen(ptr %filename, ptr @read_mode)
-  %buffer0 = call ptr @malloc(i64 16)
-  %buffer1 = call ptr @malloc(i64 16)
-  %lexeme = call ptr @malloc(i64 32)
-
+;; create buffers 0 and 1
+  %buffer0 = call ptr @malloc(i64 128)
+  %buffer1 = call ptr @malloc(i64 128)
   %file_err = icmp eq ptr %file, null
   %buffer0_err = icmp eq ptr %buffer0, null
   %buffer1_err = icmp eq ptr %buffer1, null
-  %lexeme_err = icmp eq ptr %lexeme, null
-
   %buffer_error = or i1 %buffer0_err, %buffer1_err
-  %allocation_error = or i1 %buffer_error, %lexeme_err
-  %init_error = or i1 %file_err, %allocation_error
-  br i1 %init_error, label %clean_error, label %init_success
+  %init_error = or i1 %file_err, %buffer_error
+  br i1 %init_error, label %clean_error, label %read
+
+read:
+  %bytes = call i64 @fread(ptr %buffer0, i64 1, i64 128, ptr %file)
+  %status = call i32 @ferror(ptr %file)
+  %failed = icmp ne i32 %status, 0
+  br i1 %failed, label %clean_error, label %success
+
+success:
+  %r0 = insertvalue %Reader zeroinitializer, ptr %file, 0
+  %r1 = insertvalue %Reader %r0, ptr %buffer0, 1
+  %r2 = insertvalue %Reader %r1, ptr %buffer1, 2
+  %r3 = insertvalue %Reader %r2, i64 %bytes, 7
+  %exhausted = icmp ult i64 %bytes, 128
+  %r4 = insertvalue %Reader %r3, i1 %exhausted, 9
+  store %Reader %r4, ptr %reader
+  ret ptr %reader
 
 clean_error:
   call void @free(ptr %buffer0)
   call void @free(ptr %buffer1)
-  call void @free(ptr %lexeme)
   br i1 %file_err, label %return_null, label %close_file
 
 close_file:
@@ -60,207 +69,123 @@ close_file:
 
 return_null:
   ret ptr null
-
-init_success:
-;; read file to the buffers
-  %bytes0 = call i64 @fread(ptr %buffer0, i64 1, i64 16, ptr %file)
-  %b0_error = call i32 @ferror(ptr %file)
-
-  %bytes1 = call i64 @fread(ptr %buffer1, i64 1, i64 16, ptr %file)
-  %b1_error = call i32 @ferror(ptr %file)
-
-  %b0_failed = icmp ne i32 %b0_error, 0
-  %b1_failed = icmp ne i32 %b1_error, 0
-  %read_error = or i1 %b0_failed, %b1_failed
-  br i1 %read_error, label %clean_error, label %read_success
-
-read_success:
-  %r.reader = insertvalue %Reader zeroinitializer, ptr %file, 0
-  %r.buffer0 = insertvalue %Reader %r.reader, ptr %buffer0, 1
-  %r.buffer1 = insertvalue %Reader %r.buffer0, ptr %buffer1, 2
-  %r.bytes0 = insertvalue %Reader %r.buffer1, i64 %bytes0, 7
-  %r.bytes1 = insertvalue %Reader %r.bytes0, i64 %bytes1, 8
-
-  %eof.buffer0 = icmp ult i64 %bytes0, 16
-  %eof.buffer1 = icmp ult i64 %bytes1, 16
-  %eof = or i1 %eof.buffer0, %eof.buffer1
-
-  %r.eof = insertvalue %Reader %r.bytes1, i1 %eof, 9
-  %r.lexeme = insertvalue %Reader %r.eof, ptr %lexeme, 10
-  %r.capacity = insertvalue %Reader %r.lexeme, i64 32, 12
-
-  store %Reader %r.capacity, ptr %reader
-  
-  ret ptr %reader
 }
 
 ;; Close the file and release the buffers owned by a Reader.
 define void @reader_destroy(ptr %reader) {
 entry:
-  %reader_value = load %Reader, ptr %reader
-  %file = extractvalue %Reader %reader_value, 0
-  %buffer0 = extractvalue %Reader %reader_value, 1
-  %buffer1 = extractvalue %Reader %reader_value, 2
-  %lexeme = extractvalue %Reader %reader_value, 10
-
+  %r = load %Reader, ptr %reader
+  %file = extractvalue %Reader %r, 0
+  %b0 = extractvalue %Reader %r, 1
+  %b1 = extractvalue %Reader %r, 2
   call i32 @fclose(ptr %file)
-  call void @free(ptr %buffer0)
-  call void @free(ptr %buffer1)
-  call void @free(ptr %lexeme)
-
+  call void @free(ptr %b0)
+  call void @free(ptr %b1)
   ret void
 }
-  
+
 ;; Return the next character without consuming it.
 define i32 @reader_peek(ptr %reader) {
 entry:
-  %reader_value = load %Reader, ptr %reader
-  %active = extractvalue %Reader %reader_value, 3
-  %forward = extractvalue %Reader %reader_value, 4
-  %buffer0 = extractvalue %Reader %reader_value, 1
-  %buffer1 = extractvalue %Reader %reader_value, 2
-  %valid0 = extractvalue %Reader %reader_value, 7
-  %valid1 = extractvalue %Reader %reader_value, 8
+  %r = load %Reader, ptr %reader
+  %error = extractvalue %Reader %r, 11
+  %failed = icmp ne i32 %error, 0
+  br i1 %failed, label %return_error, label %check
 
-  %buffer = select i1 %active, ptr %buffer1, ptr %buffer0
-  %buffer_valid = select i1 %active, i64 %valid1, i64 %valid0
-  %iseof = icmp uge i64 %forward, %buffer_valid
-  br i1 %iseof, label %eof, label %success
+return_error:
+  ret i32 %error
+
+check:
+  %active = extractvalue %Reader %r, 3
+  %forward = extractvalue %Reader %r, 4
+  %b0 = extractvalue %Reader %r, 1
+  %b1 = extractvalue %Reader %r, 2
+  %valid0 = extractvalue %Reader %r, 7
+  %valid1 = extractvalue %Reader %r, 8
+  %buffer = select i1 %active, ptr %b1, ptr %b0
+  %valid = select i1 %active, i64 %valid1, i64 %valid0
+  %available = icmp ult i64 %forward, %valid
+  br i1 %available, label %character, label %eof
+
+character:
+  %p = getelementptr i8, ptr %buffer, i64 %forward
+  %byte = load i8, ptr %p
+  %value = zext i8 %byte to i32
+  ret i32 %value
 
 eof:
   ret i32 -1
-
-success:
-  %char_ptr = getelementptr i8, ptr %buffer, i64 %forward
-  %char_byte = load i8, ptr %char_ptr
-  %peek = zext i8 %char_byte to i32
-  ret i32 %peek
 }
 
-;; Append one consumed byte, growing the reusable lexeme buffer when necessary.
-define internal void @reader_append_character(ptr %reader, i8 %character) {
+;; Move to the next character.
+define void @reader_step(ptr %reader) {
 entry:
-  %lexeme_field = getelementptr %Reader, ptr %reader, i32 0, i32 10
-  %length_field = getelementptr %Reader, ptr %reader, i32 0, i32 11
-  %capacity_field = getelementptr %Reader, ptr %reader, i32 0, i32 12
-  %lexeme = load ptr, ptr %lexeme_field
-  %length = load i64, ptr %length_field
-  %capacity = load i64, ptr %capacity_field
-  %already_failed = icmp eq i64 %length, -1
-  br i1 %already_failed, label %return, label %check_capacity
-
-check_capacity:
-  %needed = add i64 %length, 1
-  %has_room = icmp ult i64 %needed, %capacity
-  br i1 %has_room, label %append, label %grow
-
-grow:
-  %new_capacity = mul i64 %capacity, 2
-  %new_lexeme = call ptr @realloc(ptr %lexeme, i64 %new_capacity)
-  %growth_failed = icmp eq ptr %new_lexeme, null
-  br i1 %growth_failed, label %mark_failure, label %store_growth
-
-mark_failure:
-  store i64 -1, ptr %length_field
-  br label %return
-
-store_growth:
-  store ptr %new_lexeme, ptr %lexeme_field
-  store i64 %new_capacity, ptr %capacity_field
-  br label %append
-
-append:
-  %target = phi ptr [ %lexeme, %check_capacity ], [ %new_lexeme, %store_growth ]
-  %character_ptr = getelementptr i8, ptr %target, i64 %length
-  store i8 %character, ptr %character_ptr
-  %new_length = add i64 %length, 1
-  store i64 %new_length, ptr %length_field
-  br label %return
-
-return:
-  ret void
-}
-
-;; Switch to the other buffer and refill it if its previous chunk was consumed.
-define internal void @reader_switch_buffer(ptr %reader) {
-entry:
-  %reader_value = load %Reader, ptr %reader
-  %file = extractvalue %Reader %reader_value, 0
-  %buffer0 = extractvalue %Reader %reader_value, 1
-  %buffer1 = extractvalue %Reader %reader_value, 2
-  %active = extractvalue %Reader %reader_value, 3
-  %valid0 = extractvalue %Reader %reader_value, 7
-  %valid1 = extractvalue %Reader %reader_value, 8
-  %file_exhausted = extractvalue %Reader %reader_value, 9
-
-  %valid0_field = getelementptr %Reader, ptr %reader, i32 0, i32 7
-  %valid1_field = getelementptr %Reader, ptr %reader, i32 0, i32 8
-  %current_valid_field = select i1 %active, ptr %valid1_field, ptr %valid0_field
-  %other_valid_field = select i1 %active, ptr %valid0_field, ptr %valid1_field
-  %other_valid = select i1 %active, i64 %valid0, i64 %valid1
-  %other_buffer = select i1 %active, ptr %buffer0, ptr %buffer1
-  store i64 0, ptr %current_valid_field
-
-  %other_active = xor i1 %active, true
-  %active_field = getelementptr %Reader, ptr %reader, i32 0, i32 3
-  %forward_field_after_switch = getelementptr %Reader, ptr %reader, i32 0, i32 4
-  store i1 %other_active, ptr %active_field
-  store i64 0, ptr %forward_field_after_switch
-
-  %other_empty = icmp eq i64 %other_valid, 0
-  %can_refill = xor i1 %file_exhausted, true
-  %needs_refill = and i1 %other_empty, %can_refill
-  br i1 %needs_refill, label %refill_buffer, label %return
-
-refill_buffer:
-  %bytes = call i64 @fread(ptr %other_buffer, i64 1, i64 16, ptr %file)
-  %read_status = call i32 @ferror(ptr %file)
-  %read_failed = icmp ne i32 %read_status, 0
-  %valid_bytes = select i1 %read_failed, i64 0, i64 %bytes
-  store i64 %valid_bytes, ptr %other_valid_field
-
-  %now_exhausted = icmp ult i64 %valid_bytes, 16
-  %eof_field = getelementptr %Reader, ptr %reader, i32 0, i32 9
-  store i1 %now_exhausted, ptr %eof_field
-  br label %return
-
-return:
-  ret void
-}
-
-;; Advance after a successful peek. The character must be the value peek returned.
-define void @reader_step(ptr %reader, i32 %character) {
-entry:
-  %at_eof = icmp eq i32 %character, -1
-  br i1 %at_eof, label %return, label %advance
+  %r = load %Reader, ptr %reader
+  %error = extractvalue %Reader %r, 11
+  %active = extractvalue %Reader %r, 3
+  %forward = extractvalue %Reader %r, 4
+  %valid0 = extractvalue %Reader %r, 7
+  %valid1 = extractvalue %Reader %r, 8
+  %valid = select i1 %active, i64 %valid1, i64 %valid0
+  %ok = icmp eq i32 %error, 0
+  %available = icmp ult i64 %forward, %valid
+  %can_step = and i1 %ok, %available
+  br i1 %can_step, label %advance, label %return
 
 advance:
-  %reader_value = load %Reader, ptr %reader
-  %collecting = extractvalue %Reader %reader_value, 13
-  %active = extractvalue %Reader %reader_value, 3
-  %forward = extractvalue %Reader %reader_value, 4
-  %valid0 = extractvalue %Reader %reader_value, 7
-  %valid1 = extractvalue %Reader %reader_value, 8
-  br i1 %collecting, label %append_character, label %advance_position
-
-append_character:
-  %character_byte = trunc i32 %character to i8
-  call void @reader_append_character(ptr %reader, i8 %character_byte)
-  br label %advance_position
-
-advance_position:
-  %valid = select i1 %active, i64 %valid1, i64 %valid0
-  %next_forward = add i64 %forward, 1
-  %finished_buffer = icmp uge i64 %next_forward, %valid
-  br i1 %finished_buffer, label %switch_buffer, label %store_position
+  %next = add i64 %forward, 1
+  %finished = icmp uge i64 %next, %valid
+  br i1 %finished, label %boundary, label %store_position
 
 store_position:
   %forward_field = getelementptr %Reader, ptr %reader, i32 0, i32 4
-  store i64 %next_forward, ptr %forward_field
+  store i64 %next, ptr %forward_field
   br label %return
 
-switch_buffer:
-  call void @reader_switch_buffer(ptr %reader)
+boundary:
+  %exhausted = extractvalue %Reader %r, 9
+  br i1 %exhausted, label %store_position, label %guard
+
+guard:
+  %collecting = extractvalue %Reader %r, 10
+  %begin_buffer = extractvalue %Reader %r, 5
+  %other = xor i1 %active, true
+  %overwrites_begin = icmp eq i1 %other, %begin_buffer
+  %blocked = and i1 %collecting, %overwrites_begin
+  br i1 %blocked, label %too_long, label %refill
+
+too_long:
+  %error_field = getelementptr %Reader, ptr %reader, i32 0, i32 11
+  store i32 -2, ptr %error_field
+  br label %return
+
+refill:
+  %file = extractvalue %Reader %r, 0
+  %b0 = extractvalue %Reader %r, 1
+  %b1 = extractvalue %Reader %r, 2
+  %target = select i1 %other, ptr %b1, ptr %b0
+  %bytes = call i64 @fread(ptr %target, i64 1, i64 128, ptr %file)
+  %status = call i32 @ferror(ptr %file)
+  %read_failed = icmp ne i32 %status, 0
+  br i1 %read_failed, label %io_error, label %switch
+
+io_error:
+  %io_error_field = getelementptr %Reader, ptr %reader, i32 0, i32 11
+  store i32 -3, ptr %io_error_field
+  br label %return
+
+switch:
+  %valid0_field = getelementptr %Reader, ptr %reader, i32 0, i32 7
+  %valid1_field = getelementptr %Reader, ptr %reader, i32 0, i32 8
+  %target_valid = select i1 %other, ptr %valid1_field, ptr %valid0_field
+  %active_field = getelementptr %Reader, ptr %reader, i32 0, i32 3
+  %switch_forward_field = getelementptr %Reader, ptr %reader, i32 0, i32 4
+  %eof_field = getelementptr %Reader, ptr %reader, i32 0, i32 9
+  store i64 %bytes, ptr %target_valid
+  store i1 %other, ptr %active_field
+  store i64 0, ptr %switch_forward_field
+  %now_exhausted = icmp ult i64 %bytes, 128
+  store i1 %now_exhausted, ptr %eof_field
   br label %return
 
 return:
@@ -270,37 +195,55 @@ return:
 ;; Mark the current position as the beginning of a new lexeme.
 define void @reader_begin(ptr %reader) {
 entry:
-  %reader_value = load %Reader, ptr %reader
-  %active = extractvalue %Reader %reader_value, 3
-  %forward = extractvalue %Reader %reader_value, 4
+  %r = load %Reader, ptr %reader
+  %active = extractvalue %Reader %r, 3
+  %forward = extractvalue %Reader %r, 4
   %begin_buffer_field = getelementptr %Reader, ptr %reader, i32 0, i32 5
   %begin_position_field = getelementptr %Reader, ptr %reader, i32 0, i32 6
-  %length_field = getelementptr %Reader, ptr %reader, i32 0, i32 11
-  %collecting_field = getelementptr %Reader, ptr %reader, i32 0, i32 13
+  %collecting_field = getelementptr %Reader, ptr %reader, i32 0, i32 10
   store i1 %active, ptr %begin_buffer_field
   store i64 %forward, ptr %begin_position_field
-  store i64 0, ptr %length_field
   store i1 true, ptr %collecting_field
   ret void
 }
 
-;; End collection and return a null-terminated lexeme, or null after allocation failure.
-define ptr @reader_lexeme(ptr %reader) {
+define i1 @reader_lexeme(ptr %reader, ptr %output) {
 entry:
-  %lexeme_field = getelementptr %Reader, ptr %reader, i32 0, i32 10
-  %length_field = getelementptr %Reader, ptr %reader, i32 0, i32 11
-  %collecting_field = getelementptr %Reader, ptr %reader, i32 0, i32 13
-  %lexeme = load ptr, ptr %lexeme_field
-  %length = load i64, ptr %length_field
+  store %Lexeme zeroinitializer, ptr %output
+  %r = load %Reader, ptr %reader
+  %collecting = extractvalue %Reader %r, 10
+  %error = extractvalue %Reader %r, 11
+  %ok = icmp eq i32 %error, 0
+  %ready = and i1 %collecting, %ok
+  %collecting_field = getelementptr %Reader, ptr %reader, i32 0, i32 10
   store i1 false, ptr %collecting_field
-  %failed = icmp eq i64 %length, -1
-  br i1 %failed, label %return_null, label %terminate
+  br i1 %ready, label %extract, label %failure
 
-terminate:
-  %terminator = getelementptr i8, ptr %lexeme, i64 %length
-  store i8 0, ptr %terminator
-  ret ptr %lexeme
+extract:
+  %b0 = extractvalue %Reader %r, 1
+  %b1 = extractvalue %Reader %r, 2
+  %active = extractvalue %Reader %r, 3
+  %forward = extractvalue %Reader %r, 4
+  %begin_buffer = extractvalue %Reader %r, 5
+  %begin = extractvalue %Reader %r, 6
+  %valid0 = extractvalue %Reader %r, 7
+  %valid1 = extractvalue %Reader %r, 8
+  %start_buffer = select i1 %begin_buffer, ptr %b1, ptr %b0
+  %start_valid = select i1 %begin_buffer, i64 %valid1, i64 %valid0
+  %end_buffer = select i1 %active, ptr %b1, ptr %b0
+  %same = icmp eq i1 %active, %begin_buffer
+  %first_end = select i1 %same, i64 %forward, i64 %start_valid
+  %first_length = sub i64 %first_end, %begin
+  %first_ptr = getelementptr i8, ptr %start_buffer, i64 %begin
+  %second_ptr = select i1 %same, ptr null, ptr %end_buffer
+  %second_length = select i1 %same, i64 0, i64 %forward
+  %l0 = insertvalue %Lexeme zeroinitializer, ptr %first_ptr, 0
+  %l1 = insertvalue %Lexeme %l0, i64 %first_length, 1
+  %l2 = insertvalue %Lexeme %l1, ptr %second_ptr, 2
+  %l3 = insertvalue %Lexeme %l2, i64 %second_length, 3
+  store %Lexeme %l3, ptr %output
+  ret i1 true
 
-return_null:
-  ret ptr null
+failure:
+  ret i1 false
 }
