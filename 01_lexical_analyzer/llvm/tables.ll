@@ -12,7 +12,9 @@
 %Token = type {
     i32,      ; 0 token type
     ptr,      ; 1 lexeme
-    i64       ; 2 attribute
+    i64,      ; 2 attribute
+    i64,      ; 3 source line
+    i64       ; 4 source column
 }
 
 %TokenStream = type {
@@ -149,7 +151,7 @@ finish:
 define i1 @token_stream_init(ptr %stream) {
 entry:
   store %TokenStream zeroinitializer, ptr %stream
-  %tokens = call ptr @malloc(i64 384)
+  %tokens = call ptr @malloc(i64 640)
   %failed = icmp eq ptr %tokens, null
   br i1 %failed, label %return_false, label %success
 
