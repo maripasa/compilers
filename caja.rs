@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use syntax_analyzer::grammar;
-use syntax_analyzer::lexer::TokenKind;
 use syntax_analyzer::parser::{parse, InputToken};
 use syntax_analyzer::table::GrammarAnalysis;
 use syntax_analyzer::{Lexer, NonTerminal, Terminal, NON_TERMINALS, TERMINALS};
@@ -58,24 +57,11 @@ fn run(source: PathBuf) -> Result<ExitCode, String> {
         ));
     }
     let analysis = GrammarAnalysis::new(grammar::productions())?;
-    let mut lexer = Lexer::open(&source)?;
-    let mut input = Vec::new();
-    loop {
-        let token = lexer
-            .next_token()?
-            .ok_or_else(|| "O lexer encerrou sem produzir EOF".to_owned())?;
-        if token.kind == TokenKind::Error {
-            return Err(format!(
-                "{}:{}: erro léxico em {:?}",
-                token.line, token.column, token.lexeme
-            ));
-        }
-        let end = token.kind == TokenKind::Eof;
-        input.push(InputToken::from(token));
-        if end {
-            break;
-        }
-    }
+    let input: Vec<InputToken> = Lexer::open(&source)?
+        .tokenize()?
+        .into_iter()
+        .map(InputToken::from)
+        .collect();
 
     println!("=== Tokens do lexer ===");
     for token in &input {

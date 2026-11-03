@@ -247,6 +247,26 @@ impl Lexer {
             _ => Err("Falha interna ao ler o próximo token".to_owned()),
         }
     }
+
+    pub fn tokenize(mut self) -> Result<Vec<Token>, String> {
+        let mut tokens = Vec::new();
+        loop {
+            let token = self
+                .next_token()?
+                .ok_or_else(|| "O lexer encerrou sem produzir EOF".to_owned())?;
+            if token.kind == TokenKind::Error {
+                return Err(format!(
+                    "{}:{}: erro léxico em {:?}",
+                    token.line, token.column, token.lexeme
+                ));
+            }
+            let eof = token.kind == TokenKind::Eof;
+            tokens.push(token);
+            if eof {
+                return Ok(tokens);
+            }
+        }
+    }
 }
 
 impl Drop for Lexer {

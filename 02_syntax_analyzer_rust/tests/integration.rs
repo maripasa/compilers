@@ -10,16 +10,13 @@ fn analyze(path: &str) -> syntax_analyzer::parser::ParseReport {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join(path);
-    let mut lexer = Lexer::open(&path).unwrap();
-    let mut input = Vec::new();
-    loop {
-        let token = lexer.next_token().unwrap().unwrap();
-        let end = token.kind == syntax_analyzer::TokenKind::Eof;
-        input.push(InputToken::from(token));
-        if end {
-            break;
-        }
-    }
+    let input: Vec<InputToken> = Lexer::open(&path)
+        .unwrap()
+        .tokenize()
+        .unwrap()
+        .into_iter()
+        .map(InputToken::from)
+        .collect();
     parse(&analysis, &input)
 }
 
