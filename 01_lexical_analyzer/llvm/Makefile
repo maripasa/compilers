@@ -6,7 +6,7 @@ LLI ?= lli
 
 build: lexer.bc
 
-lexer.ll: lexer_source.c
+lexer.ll: lexer_source.c lexer_api.h
 	$(CLANG) -S -emit-llvm -O0 -o $@ $<
 
 lexer.bc: reader.ll tables.ll lexer.ll main.ll

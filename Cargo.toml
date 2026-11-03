@@ -1,0 +1,11 @@
+[package]
+name = "caja"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "caja"
+path = "caja.rs"
+
+[dependencies]
+syntax_analyzer = { path = "02_syntax_analyzer_rust" }

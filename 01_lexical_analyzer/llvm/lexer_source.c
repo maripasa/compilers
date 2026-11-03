@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "lexer_api.h"
 
 typedef struct { void *file, *b0, *b1; bool active; uint64_t forward;
                  bool begin_buffer; uint64_t begin; uint64_t valid0, valid1;
@@ -12,7 +13,7 @@ typedef struct { void *file, *b0, *b1; bool active; uint64_t forward;
 typedef struct { const char *first; uint64_t n1; const char *second; uint64_t n2; } Lexeme;
 typedef struct { char *name; uint64_t count; } Symbol;
 typedef struct { Symbol *items; uint64_t length, capacity; } SymbolTable;
-typedef struct { int32_t type; char *lexeme; uint64_t attribute, line, column; } Token;
+typedef LexerToken Token;
 typedef struct { Token *items; uint64_t length, capacity; } TokenStream;
 
 extern Reader *reader_init(Reader *, const char *);
@@ -27,9 +28,18 @@ extern void symbol_table_destroy(SymbolTable *);
 extern bool token_stream_init(TokenStream *);
 extern void token_stream_destroy(TokenStream *);
 
-enum { IDENTIFIER, INTEGER_LITERAL, REAL_LITERAL, CHAR_LITERAL,
-       STRING_LITERAL, BOOLEAN_LITERAL, NULL_LITERAL, ERROR_TOKEN, END_TOKEN,
-       KEYWORD, OPERATOR, DELIMITER };
+#define IDENTIFIER LEXER_IDENTIFIER
+#define INTEGER_LITERAL LEXER_INTEGER_LITERAL
+#define REAL_LITERAL LEXER_REAL_LITERAL
+#define CHAR_LITERAL LEXER_CHAR_LITERAL
+#define STRING_LITERAL LEXER_STRING_LITERAL
+#define BOOLEAN_LITERAL LEXER_BOOLEAN_LITERAL
+#define NULL_LITERAL LEXER_NULL_LITERAL
+#define ERROR_TOKEN LEXER_ERROR
+#define END_TOKEN LEXER_EOF
+#define KEYWORD LEXER_KEYWORD
+#define OPERATOR LEXER_OPERATOR
+#define DELIMITER LEXER_DELIMITER
 static const char *type_names[] = {
     "IDENTIFIER", "INTEGER_LITERAL", "REAL_LITERAL", "CHAR_LITERAL",
     "STRING_LITERAL", "BOOLEAN_LITERAL", "NULL_LITERAL", "ERROR", "EOF",
@@ -46,8 +56,10 @@ static const char *operators[] = {
     "+", "-", "*", "/", "%", "<", ">", "!", "&", "|", "^", "~", "=", 0
 };
 
-typedef struct { Reader reader; SymbolTable symbols; TokenStream tokens;
-                 uint64_t line, column, start_line, start_column, errors; } Scanner;
+struct Lexer { Reader reader; SymbolTable symbols; TokenStream tokens;
+               uint64_t line, column, start_line, start_column, errors;
+               bool done; };
+typedef Lexer Scanner;
 
 static void begin(Scanner *s) {
     s->start_line = s->line;
@@ -222,11 +234,27 @@ static bool scan_operator(Scanner *s) {
     return emit(s, operator_exact(word) ? OPERATOR : ERROR_TOKEN,
                 operator_exact(word) ? NULL : "operador invalido");
 }
-static int scan(Scanner *s) {
+static int scan_next(Scanner *s) {
+    if (s->done) return 0;
     for (;;) {
         int c = peek(s);
-        if (c == -1) break;
-        if (c < -1) { fprintf(stderr,"Erro de leitura: %d\n",c); return 1; }
+        if (c == -1) {
+            char *end = malloc(1);
+            if (!end) return -1;
+            end[0] = 0;
+            if (s->tokens.length == s->tokens.capacity) {
+                uint64_t capacity = s->tokens.capacity * 2;
+                Token *items = realloc(s->tokens.items, capacity * sizeof *items);
+                if (!items) { free(end); return -1; }
+                s->tokens.items = items;
+                s->tokens.capacity = capacity;
+            }
+            s->tokens.items[s->tokens.length++] =
+                (Token){ END_TOKEN, end, 0, s->line, s->column };
+            s->done = true;
+            return 1;
+        }
+        if (c < -1) { fprintf(stderr,"Erro de leitura: %d\n",c); return -1; }
         if (space(c)) { step(s); continue; }
         if (c == '/') {
             /* A comment is recognized without collecting a lexeme; arbitrarily long
@@ -246,14 +274,17 @@ static int scan(Scanner *s) {
                     if (previous == '*' && x == '/') { closed = 1; break; }
                     previous = x;
                 }
-                if ((!closed || nested) && !comment_error(s,
-                    nested ? "comentario aninhado" : "comentario nao terminado")) return 1;
+                if (!closed || nested) {
+                    if (!comment_error(s, nested ? "comentario aninhado" :
+                                       "comentario nao terminado")) return -1;
+                    return 1;
+                }
                 continue;
             }
             /* Slash was already consumed; complete / or /= from the open span. */
             if (next == '=') step(s);
-            if (!emit(s, OPERATOR, NULL)) return 1;
-            continue;
+            if (!emit(s, OPERATOR, NULL)) return -1;
+            return 1;
         }
         begin(s);
         bool ok;
@@ -269,20 +300,15 @@ static int scan(Scanner *s) {
         } else if (delimiter(c)) { step(s); ok = emit(s, DELIMITER, NULL); }
         else if (operator_prefix((char[]){(char)c,0},1)) ok = scan_operator(s);
         else { step(s); ok = emit(s, ERROR_TOKEN, "caractere invalido"); }
-        if (!ok) return 1;
+        if (!ok) return -1;
+        return 1;
     }
-    if (s->tokens.length == s->tokens.capacity) {
-        uint64_t capacity = s->tokens.capacity * 2;
-        Token *items = realloc(s->tokens.items, capacity * sizeof *items);
-        if (!items) return 1;
-        s->tokens.items = items; s->tokens.capacity = capacity;
-    }
-    char *end = malloc(1);
-    if (!end) return 1;
-    end[0] = 0;
-    s->tokens.items[s->tokens.length++] =
-        (Token){ END_TOKEN, end, 0, s->line, s->column };
-    return 0;
+}
+
+static int scan(Scanner *s) {
+    int result;
+    do { result = scan_next(s); } while (result > 0);
+    return result < 0 ? 1 : 0;
 }
 static void show(Scanner *s) {
     puts("TABELA DE TOKENS\nTIPO\tLEXEMA\tATRIBUTO\tLINHA\tCOLUNA");
@@ -323,20 +349,62 @@ static void show(Scanner *s) {
         printf("%llu\t%s\t%llu\n", (unsigned long long)i,
                s->symbols.items[i].name, (unsigned long long)s->symbols.items[i].count);
 }
+
+Lexer *lexer_open(const char *filename) {
+    if (!filename) return NULL;
+    Scanner *s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    s->line = 1;
+    s->column = 1;
+    if (!symbol_table_init(&s->symbols)) { free(s); return NULL; }
+    if (!token_stream_init(&s->tokens)) {
+        symbol_table_destroy(&s->symbols);
+        free(s);
+        return NULL;
+    }
+    if (!reader_init(&s->reader, filename)) {
+        token_stream_destroy(&s->tokens);
+        symbol_table_destroy(&s->symbols);
+        free(s);
+        return NULL;
+    }
+    return s;
+}
+
+int32_t lexer_next(Lexer *lexer, LexerToken *out) {
+    if (!lexer || !out) return -1;
+    Scanner *s = lexer;
+    int result = scan_next(s);
+    if (result < 0) s->done = true;
+    if (result != 1) return result;
+    *out = s->tokens.items[--s->tokens.length];
+    return 1;
+}
+
+void lexer_token_free(LexerToken *token) {
+    if (!token) return;
+    free(token->lexeme);
+    token->lexeme = NULL;
+}
+
+void lexer_close(Lexer *lexer) {
+    if (!lexer) return;
+    Scanner *s = lexer;
+    reader_destroy(&s->reader);
+    for (uint64_t i = 0; i < s->tokens.length; i++)
+        free(s->tokens.items[i].lexeme);
+    token_stream_destroy(&s->tokens);
+    symbol_table_destroy(&s->symbols);
+    free(s);
+}
+
 int lexer_main(int argc, char **argv) {
     if (argc != 2) { fprintf(stderr,"Uso: lexer arquivo.java\n"); return 2; }
-    Scanner s = {.line = 1, .column = 1};
-    if (!symbol_table_init(&s.symbols)) return 1;
-    if (!token_stream_init(&s.tokens)) { symbol_table_destroy(&s.symbols); return 1; }
-    if (!reader_init(&s.reader, argv[1])) {
-        fprintf(stderr,"Nao foi possivel abrir %s\n",argv[1]);
-        token_stream_destroy(&s.tokens); symbol_table_destroy(&s.symbols); return 1;
-    }
-    int status = scan(&s);
-    if (!status) show(&s);
-    reader_destroy(&s.reader);
-    for (uint64_t i = 0; i < s.tokens.length; i++) free(s.tokens.items[i].lexeme);
-    token_stream_destroy(&s.tokens);
-    symbol_table_destroy(&s.symbols);
-    return status || s.errors ? 1 : 0;
+    Scanner *s = lexer_open(argv[1]);
+    if (!s) { fprintf(stderr,"Nao foi possivel abrir %s\n",argv[1]); return 1; }
+    int status = scan(s);
+    if (!status) show(s);
+    int errors = s->errors;
+    lexer_close(s);
+    return status || errors ? 1 : 0;
 }
