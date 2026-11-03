@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use syntax_analyzer::grammar;
 use syntax_analyzer::parser::{parse, InputToken};
 use syntax_analyzer::table::GrammarAnalysis;
-use syntax_analyzer::{Lexer, NonTerminal, Terminal, NON_TERMINALS, TERMINALS};
+use syntax_analyzer::{tokenize, NonTerminal, Terminal, NON_TERMINALS, TERMINALS};
 
 fn format_set(non_terminal: NonTerminal, analysis: &GrammarAnalysis, first: bool) -> String {
     let set = if first {
@@ -57,8 +57,7 @@ fn run(source: PathBuf) -> Result<ExitCode, String> {
         ));
     }
     let analysis = GrammarAnalysis::new(grammar::productions())?;
-    let input: Vec<InputToken> = Lexer::open(&source)?
-        .tokenize()?
+    let input: Vec<InputToken> = tokenize(&source)?
         .into_iter()
         .map(InputToken::from)
         .collect();

@@ -3,16 +3,14 @@ use std::path::Path;
 use syntax_analyzer::grammar;
 use syntax_analyzer::parser::{parse, InputToken};
 use syntax_analyzer::table::GrammarAnalysis;
-use syntax_analyzer::{Lexer, NonTerminal, Terminal};
+use syntax_analyzer::{tokenize, NonTerminal, Terminal};
 
 fn analyze(path: &str) -> syntax_analyzer::parser::ParseReport {
     let analysis = GrammarAnalysis::new(grammar::productions()).unwrap();
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join(path);
-    let input: Vec<InputToken> = Lexer::open(&path)
-        .unwrap()
-        .tokenize()
+    let input: Vec<InputToken> = tokenize(&path)
         .unwrap()
         .into_iter()
         .map(InputToken::from)

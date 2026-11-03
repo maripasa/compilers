@@ -4,7 +4,7 @@ pub mod parser;
 pub mod table;
 mod translation;
 
-pub use lexer::{Lexer, TokenKind};
+pub use lexer::{tokenize, TokenKind};
 pub use translation::terminal_for;
 
 pub const NON_TERMINALS: [NonTerminal; 15] = [

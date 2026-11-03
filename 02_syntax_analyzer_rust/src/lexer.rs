@@ -211,10 +211,10 @@ pub struct Token {
     pub column: u64,
 }
 
-pub struct Lexer(NonNull<LexerHandle>);
+struct Lexer(NonNull<LexerHandle>);
 
 impl Lexer {
-    pub fn open(path: &Path) -> Result<Self, String> {
+    fn open(path: &Path) -> Result<Self, String> {
         let filename = CString::new(path.as_os_str().as_bytes())
             .map_err(|_| "O caminho contém um byte nulo".to_owned())?;
         let handle = unsafe { lexer_open(filename.as_ptr()) };
@@ -223,7 +223,7 @@ impl Lexer {
             .ok_or_else(|| format!("Não foi possível abrir {}", path.display()))
     }
 
-    pub fn next_token(&mut self) -> Result<Option<Token>, String> {
+    fn next_token(&mut self) -> Result<Option<Token>, String> {
         let mut raw = std::mem::MaybeUninit::<RawToken>::uninit();
         let result = unsafe { lexer_next(self.0.as_ptr(), raw.as_mut_ptr()) };
         match result {
@@ -247,24 +247,25 @@ impl Lexer {
             _ => Err("Falha interna ao ler o próximo token".to_owned()),
         }
     }
+}
 
-    pub fn tokenize(mut self) -> Result<Vec<Token>, String> {
-        let mut tokens = Vec::new();
-        loop {
-            let token = self
-                .next_token()?
-                .ok_or_else(|| "O lexer encerrou sem produzir EOF".to_owned())?;
-            if token.kind == TokenKind::Error {
-                return Err(format!(
-                    "{}:{}: erro léxico em {:?}",
-                    token.line, token.column, token.lexeme
-                ));
-            }
-            let eof = token.kind == TokenKind::Eof;
-            tokens.push(token);
-            if eof {
-                return Ok(tokens);
-            }
+pub fn tokenize(path: &Path) -> Result<Vec<Token>, String> {
+    let mut lexer = Lexer::open(path)?;
+    let mut tokens = Vec::new();
+    loop {
+        let token = lexer
+            .next_token()?
+            .ok_or_else(|| "O lexer encerrou sem produzir EOF".to_owned())?;
+        if token.kind == TokenKind::Error {
+            return Err(format!(
+                "{}:{}: erro léxico em {:?}",
+                token.line, token.column, token.lexeme
+            ));
+        }
+        let eof = token.kind == TokenKind::Eof;
+        tokens.push(token);
+        if eof {
+            return Ok(tokens);
         }
     }
 }
